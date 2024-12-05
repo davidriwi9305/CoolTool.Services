@@ -1,4 +1,14 @@
-# Create a new microservice
+# CoolTool Microservices
+
+## Run Project
+
+```sh
+cd cooltool.service.example-user
+npm i
+npm run start:dev
+```
+
+## Create a new microservice
 
 1. Setup Your NestJS Microservices
 
