@@ -1,8 +1,8 @@
 {
-  "name": "cooltool.service.pricing",
-  "version": "0.0.1",
+  "name": "cooltool.service.database.mongo.old",
+  "version": "1.0.1",
   "description": "",
-  "author": "",
+  "author": "David Martinez",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
