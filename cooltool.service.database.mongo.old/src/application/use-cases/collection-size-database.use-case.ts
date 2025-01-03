@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { CollectionSizeDatabaseService } from 'src/domain/services/clean/collections-size-database.service';
+import { CollectionSizeDatabaseService } from 'src/domain/services/collections-size-database.service';
 
 @Injectable()
 export class CollectionSizeDatabaseUseCase {

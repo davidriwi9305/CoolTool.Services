@@ -2,23 +2,30 @@ import { Injectable, Inject } from '@nestjs/common';
 
 @Injectable()
 export class CollectionSizeDatabaseService {
-  constructor(@Inject('DATABASE_CONNECTION') private readonly db: any) {}
+    constructor(@Inject('DATABASE_CONNECTION') private readonly db: any) { }
 
-  async sizes(): Promise<void> {
+    async sizes(): Promise<void> {
+        
+        // Get all collection names
+        let collections = await this.db.listCollections().toArray();
 
-    let totalSize = 0;
-    let totalDocuments = 0;
+        let collectionPromises = collections.map(collection => {
+            return this.db.collection(collection.name).stats();
+        });
 
-    console.log(this.db)
+        Promise.all(collectionPromises).then(results => {
+            let tableData;
+            let totalSize = 0;
+            let totalDocuments = 0;
+            ({ tableData, totalSize, totalDocuments } = this.buildTableCollectionsSize(results, totalSize, totalDocuments));
+           
+            this.printInConsole(tableData, totalDocuments, totalSize);
+        }).catch(err => console.error("Error retrieving stats:", err));
 
-    // Get all collection names
-    let collections = await this.db.listCollections().toArray();
+        return
+    }
 
-    let collectionPromises = collections.map(collection => {
-        return this.db.collection(collection.name).stats();
-    });
-
-    Promise.all(collectionPromises).then(results => {
+    private buildTableCollectionsSize(results: any[], totalSize: number, totalDocuments: number) {
         let tableData = [];
 
         results.forEach(stats => {
@@ -27,7 +34,7 @@ export class CollectionSizeDatabaseService {
 
             tableData.push({
                 Collection: stats.ns,
-                Size: stats.size,  // Store the size in bytes for sorting
+                Size: stats.size, // Store the size in bytes for sorting
                 Documents: stats.count
             });
         });
@@ -41,13 +48,8 @@ export class CollectionSizeDatabaseService {
             Size: this.formatSize(item.Size),
             Documents: item.Documents
         }));
-
-        // Print to console
-        this.printInConsole(tableData, totalDocuments, totalSize);
-    }).catch(err => console.error("Error retrieving stats:", err));
-
-    return
-  }
+        return { tableData, totalSize, totalDocuments };
+    }
 
     private printInConsole(tableData: any[], totalDocuments: number, totalSize: number) {
         console.table(tableData);
@@ -59,10 +61,10 @@ export class CollectionSizeDatabaseService {
         console.log("Average Document Size:", this.formatSize(avgSize));
     }
 
-    private formatSize(sizeInBytes) {
+    formatSize(sizeInBytes) {
         const megabytes = sizeInBytes / (1024 * 1024);
         const gigabytes = sizeInBytes / (1024 * 1024 * 1024);
-        
+
         if (gigabytes >= 1) {
             return gigabytes.toFixed(2) + ' GB';
         } else if (megabytes >= 1) {
