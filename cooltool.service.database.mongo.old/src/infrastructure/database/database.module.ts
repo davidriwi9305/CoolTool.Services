@@ -1,24 +1,22 @@
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { Module, Global } from '@nestjs/common';
+import { MongoClient } from 'mongodb';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { UserEntity } from 'src/domain/entities/user.entity';
 
-var entities = [
-    UserEntity
-]
-
-export const DatabaseConfig = [
-  ConfigModule.forRoot({
-    isGlobal: true, // Makes environment variables globally available
-  }),
-  TypeOrmModule.forRootAsync({
-    imports: [ConfigModule],
-    useFactory: (configService: ConfigService) => ({
-      type: 'sqlite',
-      database: configService.get<string>('DATABASE_PATH', 'database.sqlite'), // Get database file from .env
-      entities: entities, // Load all entities
-      synchronize: true, // Automatically sync schema (disable in production)
-    }),
-    inject: [ConfigService],
-  }),
-  TypeOrmModule.forFeature(entities), // Register the UserEntity for DI
-];
+@Global()
+@Module({
+  imports: [ConfigModule],
+  providers: [
+    {
+      provide: 'DATABASE_CONNECTION',
+      useFactory: async (configService: ConfigService) => {
+        const uri = configService.get<string>('DATABASE_URI', 'mongodb://localhost:27017/CoolTool');
+        const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
+        await client.connect();
+        return client.db();
+      },
+      inject: [ConfigService],
+    },
+  ],
+  exports: ['DATABASE_CONNECTION'],
+})
+export class DatabaseModule {}
