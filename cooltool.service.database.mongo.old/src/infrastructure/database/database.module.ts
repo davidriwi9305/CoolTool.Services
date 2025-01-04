@@ -9,12 +9,12 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
     {
       provide: 'DATABASE_CONNECTION',
       useFactory: async (configService: ConfigService) => {
-        const uri =configService.get<string>('DATABASE_URI', 'mongodb://127.0.0.1:29843');
+        const uri =configService.get<string>('DATABASE_URI', 'mongodb://127.0.0.1:29696');
         const dbName = 'CoolTool'; // Replace with your database name
 
         try {
           console.log("Connecting to Database:", uri);
-          const client = await MongoClient.connect(uri, { useNewUrlParser: true, useUnifiedTopology: true });
+          const client = await MongoClient.connect(uri);
           console.log("Connected to MongoDB");
           return client.db(dbName);
         } catch (err) {

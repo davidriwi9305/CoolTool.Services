@@ -1,107 +1,81 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { excludeCollectionsToRemove } from 'src/domain/const/exclude-collections-to-remove';
-import { CollectionSizeDatabaseService } from '../collections-size-database.service';
-import { ObjectId, MongoClient } from 'mongodb';
+import { ObjectId } from 'mongodb';
 
 @Injectable()
 export class CleanupRecordsDatabaseService {
+    
+    private DefaultBatchSize = 1000; // Define the size of each batch
+    private DefaultYearsAgoToRemove = 5;
+
     constructor(
         @Inject('DATABASE_CONNECTION') private readonly db: any,
         @Inject('DATABASE_CONNECTION_BACKUP') private readonly dbb: any,
-        private readonly collectionSizeDatabaseService: CollectionSizeDatabaseService, // Inject domain service
     ) { }
 
+    /**
+    * Principal function to clean old records
+    */
     async cleanupOldRecords(): Promise<void> {
         try {
-            // Collections to exclude
-            const excludeCollections = excludeCollectionsToRemove
-
-            // Get all collection names
             const collections = await this.db.listCollections().toArray();
 
-            // Filter out excluded collections
-            const collectionsToProcess = collections.filter(
-                (collection) => !excludeCollections.includes(collection.name)
-            );
+            // Filter out excluded collections using `Name` and `Excluded`
+            const collectionsToProcess = collections.filter((collection) => {
+                const excludeConfig = excludeCollectionsToRemove.find(
+                    (excludeItem) => excludeItem.Name === collection.name
+                );
+                return !excludeConfig?.Excluded; // Process collections only if not excluded
+            });
 
-            const currentDate = new Date();
-            const yearsAgoToRemove = 5;
-            const yearsAgo = new Date();
+            // Map collections with their specific configuration
+            const collectionsWithConfig = collectionsToProcess.map((collection) => {
+                const config = excludeCollectionsToRemove.find(
+                    (excludeItem) => excludeItem.Name === collection.name
+                );
+                return {
+                    collectionName: collection.name,
+                    BatchSize: config?.BatchSize ?? this.DefaultBatchSize, // Default to the service-level BatchSize
+                    YearsAgoToRemove: config?.YearsAgoToRemove ?? this.DefaultYearsAgoToRemove, // Default to service-level YearsAgoToRemove
+                    UpdateIndex: config?.UpdateIndex ?? true,
+                    FieldToCheck: config?.FieldToCheck ?? "LastUpdated",
+                    QueryToRemove: config?.QueryToRemove
+                };
+            });
 
+            const collectionPromises = collectionsWithConfig.map(async (config) => {
 
-            const collectionPromises = collectionsToProcess.map(async (collection) => {
+                const { BatchSize, collectionName, YearsAgoToRemove, UpdateIndex, FieldToCheck } = config;
 
-                const collectionName = collection.name;
-                const batchSize = 1000; // Define the size of each batch
                 let hasMoreRecords = true;
-                let lastProcessedId = null;
                 let counterRecordsProcessed = 0;
-                console.log(`Processing collection: ${collectionName}`);
-                yearsAgo.setFullYear(currentDate.getFullYear() - yearsAgoToRemove);
+
+
+                console.debug(`Starting to process collection: ${collectionName}, Batch: ${BatchSize}, YearsAgoToRemove: ${YearsAgoToRemove}, FieldToCheck: ${FieldToCheck}`);
 
                 try {
-                    // Ensure indexes are in place
-                    await this.ensureBackupIndexes(collectionName);
-                    console.log(`${collectionName}: Indexes Created`);
+                    if(UpdateIndex){
+                        await this.ensureBackupIndexes(collectionName);
+                    }
 
                     while (hasMoreRecords) {
                         // Fetch a batch of records
-                        const query = {
-                            $or: [
-                                { LastUpdated: { $lt: yearsAgo } },
-                                { _id: lastProcessedId ? { $gt: lastProcessedId, $lt: ObjectId.createFromTime(yearsAgo.getTime() / 1000) } : { $lt: ObjectId.createFromTime(yearsAgo.getTime() / 1000) } }
-                            ]
-                        };
-
-                        const recordsToRemove = await this.db
-                            .collection(collectionName)
-                            .find(query)
-                            .sort({ _id: 1 }) // Sort by _id to ensure consistent batching
-                            .limit(batchSize)
-                            .toArray();
-
-                        counterRecordsProcessed += recordsToRemove.length;
-                        console.log(`${collectionName} has more records, total processed: ${counterRecordsProcessed}`);
+                        let recordsToRemove;
+                        ({ recordsToRemove, counterRecordsProcessed } = await this.getRecordsToRemove(config, counterRecordsProcessed));
 
                         if (recordsToRemove.length > 0) {
 
                             let insertResult;
-                            let savedBackup = false
 
-                            do {
-                                try {
-                                    insertResult  =  await this.dbb.collection(collectionName).insertMany(recordsToRemove, { ordered: false });
-                                    savedBackup = true
-                                } catch (error) {
-                                    console.log(`Data found in backup Database processing using updateOne`)
-                                    // If exist some repeat records, we remove data to start again to insert
-                                    const idsToDelete = recordsToRemove.map((record) => record._id);
-                                    await this.dbb.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
-                                    savedBackup = false
-                                    console.log(`Restart process to save data`)
-                                }
-                            } while (!savedBackup);
+                            ({ insertResult } = await this.insertingRecordsToRemoveToBackup(insertResult, collectionName, recordsToRemove));
 
-
-                            if (insertResult && insertResult.insertedCount === recordsToRemove.length) {
-                                console.log(`Successfully backed up ${insertResult.insertedCount} records to ${collectionName} inside Backup Database`);
-
-                                const idsToDelete = recordsToRemove.map((record) => record._id);
-                                const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
-                                console.log(`Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
-
-                            } else {
-                                console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${insertResult.insertedCount}`);
-                            }
+                            await this.removingRecordsFromMain(insertResult, recordsToRemove, collectionName);
+                            
                         } else {
                             console.log(`${collectionName} has not more records to process, total processed: ${counterRecordsProcessed}`);
                             hasMoreRecords = false;
                         }
-
-                        console.log(`Completed processing for collection: ${collectionName}`);
                     }
-
-                    console.log('Cleanup completed for all applicable collections.');
 
                 } catch (err) {
 
@@ -110,11 +84,66 @@ export class CleanupRecordsDatabaseService {
             });
 
             await Promise.all(collectionPromises);
-
-            console.log('Cleanup completed for all applicable collections.');
+            console.debug('Cleanup completed for all applicable collections.');
         } catch (err) {
             console.error('Error during cleanup:', err);
         }
+    }
+
+    /**
+    * Ensures necessary removing records from main database
+    */
+    private async removingRecordsFromMain(insertResult: any, recordsToRemove: any, collectionName: any) {
+        if (insertResult && insertResult.insertedCount === recordsToRemove.length) {
+            console.log(`Successfully backed up ${insertResult.insertedCount} records to ${collectionName} inside Backup Database`);
+
+            const idsToDelete = recordsToRemove.map((record) => record._id);
+            const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
+            console.log(`Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
+
+        } else {
+            console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${insertResult.insertedCount}`);
+        }
+    }
+
+    private async insertingRecordsToRemoveToBackup(insertResult: any, collectionName: any, recordsToRemove: any) {
+        let savedBackup = false
+        do {
+            try {
+                insertResult = await this.dbb.collection(collectionName).insertMany(recordsToRemove, { ordered: false });
+                savedBackup = true;
+            } catch (error) {
+                console.log(`Data found in backup Database processing removing and restarting process`);
+                // If exist some repeat records, we remove data to start again to insert
+                const idsToDelete = recordsToRemove.map((record) => record._id);
+                await this.dbb.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
+                savedBackup = false;
+                console.warn(`Restart process to save data`);
+            }
+        } while (!savedBackup);
+        return { insertResult, savedBackup };
+    }
+
+    private async getRecordsToRemove(config: any, counterRecordsProcessed: number) {
+    
+        const currentDate = new Date();
+        const yearsAgo = new Date();
+        const {  BatchSize, YearsAgoToRemove, collectionName, FieldToCheck, QueryToRemove } = config;
+        
+        yearsAgo.setFullYear(currentDate.getFullYear() - YearsAgoToRemove);
+
+        const query = QueryToRemove ?? {[FieldToCheck]: { $lt: yearsAgo }};
+        
+        const recordsToRemove = await this.db
+            .collection(collectionName)
+            .find(query)
+            .limit(BatchSize)
+            .sort({ _id: 1 }) // Sort by _id to ensure consistent batching
+            .toArray();
+
+        counterRecordsProcessed += recordsToRemove.length;
+        console.log(`${collectionName} total records to processe: ${counterRecordsProcessed}`);
+        return { recordsToRemove, counterRecordsProcessed };
     }
 
     /**
