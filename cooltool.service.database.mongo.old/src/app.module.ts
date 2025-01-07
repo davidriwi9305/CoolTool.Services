@@ -9,6 +9,8 @@ import { CollectionsController } from './interfaces/controllers/collections.cont
 import { DatabaseModule } from './infrastructure/database/database.module';
 import { CleanupDatabaseController } from './interfaces/controllers/cleanup-records-database.controller';
 import { DatabaseBackupModule } from './infrastructure/database/backup-database.module';
+import { ConfigModule } from '@nestjs/config';
+
 
 const providers = [
   CleanupDatabaseUseCase,
@@ -19,10 +21,12 @@ const providers = [
   AppService
 ]
 
-console.log(__dirname)
 @Module({
   imports: [
-    DatabaseModule, DatabaseBackupModule
+    DatabaseModule, DatabaseBackupModule,
+    ConfigModule.forRoot({
+      isGlobal: true,
+    }),
   ],
   controllers: [AppController, CleanupDatabaseController, CollectionsController],
   providers: providers,

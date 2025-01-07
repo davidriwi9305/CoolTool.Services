@@ -792,12 +792,6 @@ export const excludeCollectionsToRemove = [
         "YearsAgoToRemove": 5
     },
     {
-        "Name": "Project",
-        "Excluded": true,
-        "BatchSize": 1000,
-        "YearsAgoToRemove": 5
-    },
-    {
         "Name": "MSTOSocketClosingTask",
         "Excluded": true,
         "BatchSize": 1000,
@@ -954,12 +948,18 @@ export const excludeCollectionsToRemove = [
         "YearsAgoToRemove": 5
     },
 
-
-
+    // Running
     {
-        "Name": "HttpRequestLog",
+        "Name": "Project", //Working
         "Excluded": true,
-        "BatchSize": 1000,
+        "BatchSize": 10000,
+        "YearsAgoToRemove": 5,
+        "UpdateIndex": false
+    },
+    {
+        "Name": "HttpRequestLog", //Working
+        "Excluded": true,
+        "BatchSize": 10000,
         "YearsAgoToRemove": 5,
         "UpdateIndex": false,
         "FieldToCheck": "CreateDate"
@@ -967,22 +967,26 @@ export const excludeCollectionsToRemove = [
     {
         "Name": "NeurolabData",
         "Excluded": true,
-        "BatchSize": 1000,
+        "BatchSize": 2,
         "YearsAgoToRemove": 5,
-        "UpdateIndex": false
+        "UpdateIndex": false,
+        // Inside this collection we can't remove data using YearsAgoToRemove, we can´t compare dates
+        // The CaptureCollection field was created in December 2020. In this database we have no creation or update, that's why I chose these fields to filter the data from this point.
+        // If CaptureCollection does not exist it is because it is an old record before December 2020
+        "QueryToRemove": { CaptureCollection: { $exists: false } }
     },
     {
-        "Name": "ProjectContactAnswer", //working
-        "Excluded": false,
-        "BatchSize": 100000,
+        "Name": "ProjectContactAnswer", //working more or less
+        "Excluded": true,
+        "BatchSize": 1, //100000,
         "YearsAgoToRemove": 5,
         "UpdateIndex": false,
         "FieldToCheck": "CreateDate" 
     },
     {
-        "Name": "NeuroLabEyeTrackerData",
+        "Name": "NeuroLabEyeTrackerData", //working more or less
         "Excluded": true,
-        "BatchSize": 10000,
+        "BatchSize": 1,
         "YearsAgoToRemove": 5,
         "UpdateIndex": false,
         // Inside this collection we can't remove data using YearsAgoToRemove, we can´t compare dates
@@ -994,7 +998,7 @@ export const excludeCollectionsToRemove = [
         "Name": "CaptureCollection",  //working
         "Excluded": true,
         "BatchSize": 1000,
-        "YearsAgoToRemove": 5,
+        "YearsAgoToRemove": 3,
         "UpdateIndex": false 
     }
 ]
