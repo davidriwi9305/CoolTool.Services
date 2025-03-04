@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Param  } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { CleanupDatabaseUseCase } from '../../application/use-cases/clean-up-database.use-case';
 
@@ -13,5 +13,14 @@ export class CleanupDatabaseController {
   async oldRecords(
   ): Promise<boolean> {
     return this.cleanDatabaseUseCase.oldRecords();
+  }
+
+  @Get('recover/:collection/:backupFileKey')
+  async recoverRecords(
+    @Param('collection') collection: string, 
+    @Param('backupFileKey') backupFileKey: string
+  ): Promise<boolean> {
+    await this.cleanDatabaseUseCase.recoverRecords(collection, backupFileKey);
+    return true;
   }
 }

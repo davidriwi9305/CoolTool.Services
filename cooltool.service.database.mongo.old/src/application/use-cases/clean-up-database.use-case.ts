@@ -11,4 +11,9 @@ export class CleanupDatabaseUseCase {
     await this.cleanupOldRecordsDatabaseService.cleanupOldRecords();
     return true;
   }
+
+  async recoverRecords(collection: string, backupFileKey: string): Promise<boolean> {
+    await this.cleanupOldRecordsDatabaseService.restoreBackupFromS3(collection, backupFileKey);
+    return true;
+  }
 }

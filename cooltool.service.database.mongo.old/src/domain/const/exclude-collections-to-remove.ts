@@ -1,3 +1,8 @@
+function ISODate(arg0: string) {
+    var newDate = new Date(arg0);
+    return newDate
+}
+
 export const excludeCollectionsToRemove = [
     {
         "Name": "system.indexes",
@@ -996,9 +1001,11 @@ export const excludeCollectionsToRemove = [
     },
     {
         "Name": "CaptureCollection",  //working
-        "Excluded": true,
+        "Excluded": false,
         "BatchSize": 1000,
         "YearsAgoToRemove": 3,
-        "UpdateIndex": false 
+        "UpdateIndex": false,
+        "QueryToRemove": {_id:{$lt:194053441}} // First we are going to remove all elements before this id, which means is old than 2017
+        // "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2017-12-31T00:00:00.000Z") },"CreateDate": { "$lt": ISODate("2017-12-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
     }
 ]

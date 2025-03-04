@@ -1,16 +1,27 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Logger  } from '@nestjs/common';
 import { excludeCollectionsToRemove } from 'src/domain/const/exclude-collections-to-remove';
-import { ObjectId } from 'mongodb';
+import { S3 } from 'aws-sdk';
+import * as zlib from 'zlib';
 
 @Injectable()
 export class CleanupRecordsDatabaseService {
+
+    private s3 = new S3({ 
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        region: process.env.AWS_REGION || 'us-east-1'
+     });
+    private BUCKET_NAME = process.env.S3_BUCKET_NAME || 'your-s3-bucket';
+    private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
+    private STORAGE_CLASS = process.env.S3_STORAGE_CLASS || 'STANDARD_IA ';
+
+    private readonly logger = new Logger(CleanupRecordsDatabaseService.name);
     
     private DefaultBatchSize = 1000; // Define the size of each batch
     private DefaultYearsAgoToRemove = 5;
 
     constructor(
         @Inject('DATABASE_CONNECTION') private readonly db: any,
-        @Inject('DATABASE_CONNECTION_BACKUP') private readonly dbb: any,
     ) { }
 
     /**
@@ -50,13 +61,9 @@ export class CleanupRecordsDatabaseService {
                 let hasMoreRecords = true;
                 let counterRecordsProcessed = 0;
 
-
                 console.debug(`Starting to process collection: ${collectionName}, Batch: ${BatchSize}, YearsAgoToRemove: ${YearsAgoToRemove}, FieldToCheck: ${FieldToCheck}`);
 
                 try {
-                    if(UpdateIndex){
-                        await this.ensureBackupIndexes(collectionName);
-                    }
 
                     while (hasMoreRecords) {
                         // Fetch a batch of records
@@ -68,7 +75,6 @@ export class CleanupRecordsDatabaseService {
                             let insertResult;
 
                             ({ insertResult } = await this.insertingRecordsToRemoveToBackup(insertResult, collectionName, recordsToRemove));
-
                             await this.removingRecordsFromMain(insertResult, recordsToRemove, collectionName);
                             
                         } else {
@@ -87,6 +93,8 @@ export class CleanupRecordsDatabaseService {
             console.debug('Cleanup completed for all applicable collections.');
         } catch (err) {
             console.error('Error during cleanup:', err);
+        }finally {
+            // await this.db.close();
         }
     }
 
@@ -94,13 +102,10 @@ export class CleanupRecordsDatabaseService {
     * Ensures necessary removing records from main database
     */
     private async removingRecordsFromMain(insertResult: any, recordsToRemove: any, collectionName: any) {
-        if (insertResult && insertResult.insertedCount === recordsToRemove.length) {
-            console.log(`Successfully backed up ${insertResult.insertedCount} records to ${collectionName} inside Backup Database`);
-
+        if (insertResult && insertResult.ETag) {
             const idsToDelete = recordsToRemove.map((record) => record._id);
             const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
             console.log(`Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
-
         } else {
             console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${insertResult.insertedCount}`);
         }
@@ -110,13 +115,32 @@ export class CleanupRecordsDatabaseService {
         let savedBackup = false
         do {
             try {
-                insertResult = await this.dbb.collection(collectionName).insertMany(recordsToRemove, { ordered: false });
+                const compressedData = zlib.gzipSync(JSON.stringify(recordsToRemove));
+                const now = new Date();
+                const year = now.getFullYear();
+                const month = String(now.getMonth() + 1).padStart(2, '0');
+                const day = String(now.getDate()).padStart(2, '0');
+                const fromId = recordsToRemove[0]?._id.toString() || 'start';
+                const toId = recordsToRemove[recordsToRemove.length - 1]?._id.toString() || 'end';
+                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_${year}-${month}-${day}.gz`;
+                
+                console.debug(`Saving in bucket`);
+
+                insertResult = await this.s3.putObject({
+                    Bucket: this.BUCKET_NAME,
+                    Key: fileName,
+                    Body: compressedData,
+                    ContentEncoding: 'gzip',
+                    ContentType: 'application/json',
+                    StorageClass: this.STORAGE_CLASS,
+                }).promise();
+
                 savedBackup = true;
+
+                console.debug(`Saved elements inside bucket: ${this.BUCKET_NAME}/${fileName}`);
             } catch (error) {
-                console.log(`Data found in backup Database processing removing and restarting process`);
-                // If exist some repeat records, we remove data to start again to insert
-                const idsToDelete = recordsToRemove.map((record) => record._id);
-                await this.dbb.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
+                console.log(error)
+                console.log(`Data found in backup S3 storage, processing removal and restarting process`);
                 savedBackup = false;
                 console.warn(`Restart process to save data`);
             }
@@ -128,43 +152,63 @@ export class CleanupRecordsDatabaseService {
     
         const currentDate = new Date();
         const yearsAgo = new Date();
-        const {  BatchSize, YearsAgoToRemove, collectionName, FieldToCheck, QueryToRemove } = config;
+        let {  BatchSize, YearsAgoToRemove, collectionName, FieldToCheck, QueryToRemove } = config;
         
         yearsAgo.setFullYear(currentDate.getFullYear() - YearsAgoToRemove);
 
         const query = QueryToRemove ?? {[FieldToCheck]: { $lt: yearsAgo }};
-        
-        const recordsToRemove = await this.db
+        let recordsToRemove;
+        console.log({collectionName}, query)
+        // const firstRecord = await this.db.collection(collectionName).findOne(query);
+        const firstRecord = await this.db.collection(collectionName)
+                                .find(query)
+                                .sort({ _id: 1 }) // Sort by _id for consistent batching
+                                .limit(1) // Fetch only one record
+                                .project({ _id: 1 }) // Only fetch required fields, if applicable
+                                .toArray();
+
+        console.log(yearsAgo, firstRecord[0]?._id)
+        console.log(`Current Total Elements: ${firstRecord.length}`)
+        try {
+            recordsToRemove = await this.db
             .collection(collectionName)
             .find(query)
             .limit(BatchSize)
             .sort({ _id: 1 }) // Sort by _id to ensure consistent batching
             .toArray();
-
+        } catch (error) {
+            console.log('Get records to remove having problems', error)
+        }
+        return
         counterRecordsProcessed += recordsToRemove.length;
-        console.log(`${collectionName} total records to processe: ${counterRecordsProcessed}`);
+        console.log(`${collectionName} total records to process: ${counterRecordsProcessed}`);
         return { recordsToRemove, counterRecordsProcessed };
     }
 
-    /**
-    * Ensures necessary indexes are in place for efficient querying.
-    */
-    private async ensureBackupIndexes(collectionName: string): Promise<void> {
+    public async restoreBackupFromS3(collectionName: string, backupFileKey: string) {
         try {
-            console.log(`Ensuring indexes for backup collection: ${collectionName} inside backup database`);
+            console.log(`Restoring  records from ${backupFileKey} to ${collectionName}`);
+            const collection = this.db.collection(collectionName);
+            const s3Object = await this.s3.getObject({
+                Bucket: this.BUCKET_NAME,
+                Key: backupFileKey
+            }).promise();
+            
+            const decompressedData = JSON.parse(zlib.gunzipSync(s3Object.Body as Buffer).toString());
+            
+            await collection.insertMany(decompressedData);
+            console.log(`Restored ${decompressedData.length} records to ${collectionName}`);
 
-            const mainIndexes = await this.db.collection(collectionName).indexes();
-
-            for (const index of mainIndexes) {
-                // Create index in the backup collection
-                const indexKey = index.key;
-                const indexOptions = { ...index, key: undefined }; // Remove the key, it will be passed separately
-                await this.dbb.collection(collectionName).createIndex(indexKey, indexOptions);
-            }
-
-            console.log(`Indexes ensured for backup collection: ${collectionName}  inside backup database`);
-        } catch (err) {
-            console.error(`Error ensuring indexes inside backup database for ${collectionName}:`, err);
+            // Delete the file from S3 after successful restoration
+            await this.s3.deleteObject({
+                Bucket: this.BUCKET_NAME,
+                Key: backupFileKey
+            }).promise();
+            console.log(`Deleted backup file ${backupFileKey} from S3`);
+        } catch (error) {
+            console.error(`Error restoring backup:`, error);
+        } finally {
+            // await this.db.close();
         }
     }
 }
