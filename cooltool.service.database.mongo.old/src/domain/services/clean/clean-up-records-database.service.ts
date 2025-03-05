@@ -101,7 +101,7 @@ export class CleanupRecordsDatabaseService {
     * Ensures necessary removing records from main database
     */
     private async removingRecordsFromMain(savedBackup: any, recordsToRemove: any, collectionName: any) {
-        console.log({savedBackup})
+        // console.log({savedBackup})
         if (savedBackup) {
             const idsToDelete = recordsToRemove.map((record) => record._id);
             const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
