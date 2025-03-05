@@ -11,7 +11,7 @@ export class CleanupRecordsDatabaseService {
     private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
     private STORAGE_CLASS = process.env.S3_STORAGE_CLASS || 'STANDARD_IA ';
 
-    private MaxSizeToSave = 10 //MB
+    private MaxSizeToSave = 1000 //MB
     private DefaultBatchSize = 500; // Define the size of each batch
     private DefaultYearsAgoToRemove = 5;
 
@@ -60,7 +60,7 @@ export class CleanupRecordsDatabaseService {
                 let hasMoreRecords = true;
                 let counterRecordsProcessed = 0;
 
-                console.debug(`Starting to process collection: ${collectionName}, Batch: ${BatchSize}, YearsAgoToRemove: ${YearsAgoToRemove}, FieldToCheck: ${FieldToCheck}`);
+                console.debug(`🚀 Starting to process collection: ${collectionName}, Batch: ${BatchSize}`);
 
                 try {
 
@@ -77,21 +77,21 @@ export class CleanupRecordsDatabaseService {
                             await this.removingRecordsFromMain(savedBackup, recordsToRemove, collectionName);
                             
                         } else {
-                            console.log(`${collectionName} has not more records to process, total processed: ${counterRecordsProcessed}`);
+                            console.log(`📢 ${collectionName} has not more records to process, total processed: ${counterRecordsProcessed}`);
                             hasMoreRecords = false;
                         }
                     }
 
                 } catch (err) {
 
-                    console.error(`Error processing ${collectionName}:`, err);
+                    console.error(`❌ Error processing ${collectionName}:`, err);
                 }
             });
 
             await Promise.all(collectionPromises);
-            console.debug('Cleanup completed for all applicable collections.');
+            console.debug('✅ Cleanup completed for all applicable collections.');
         } catch (err) {
-            console.error('Error during cleanup:', err);
+            console.error('❌ Error during cleanup:', err);
         }finally {
             // await this.db.close();
         }
@@ -105,9 +105,9 @@ export class CleanupRecordsDatabaseService {
         if (savedBackup) {
             const idsToDelete = recordsToRemove.map((record) => record._id);
             const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
-            console.log(`Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
+            console.log(`🗑️ Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
         } else {
-            console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${savedBackup}`);
+            console.warn(`❌ Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}`);
         }
     }
 
@@ -123,7 +123,7 @@ export class CleanupRecordsDatabaseService {
                 const toId = recordsToRemove[recordsToRemove.length - 1]?._id.toString() || 'end';
                 const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove.length}_date_${year}-${month}-${day}.gz`;
 
-                console.debug(`Saving large file in S3 via streaming...`);
+                console.debug(`📤 Saving large file in S3 via streaming...`);
     
                 const jsonStream = new PassThrough();
                 const gzipStream = zlib.createGzip();
@@ -152,9 +152,9 @@ export class CleanupRecordsDatabaseService {
     
                 console.debug(`✅ Large file saved successfully in S3: ${this.BUCKET_NAME}/${fileName}`);
             } catch (error) {
-                console.error(`Error while saving large file to S3:`, error);
+                console.error(`❌ Error while saving large file to S3:`, error);
                 savedBackup = false;
-                console.warn(`Restarting process to save data...`);
+                console.warn(`🔄 Restarting process to save data...`);
             }
         } while (!savedBackup);
     
@@ -206,13 +206,13 @@ export class CleanupRecordsDatabaseService {
                     counterRecordsProcessed++;
                 }
 
-                console.log(`Accumulating documents until having more than ${this.MaxSizeToSave} MB, Current: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB, total records to remove: ${counterRecordsProcessed}`);
+                console.log(`⚡ Accumulating documents until having more than ${this.MaxSizeToSave} MB, Current: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB, total records to remove: ${counterRecordsProcessed}`);
 
             }
         } catch (error) {
-            console.log('Get records to remove having problems', error)
+            console.log('❌ Get records to remove having problems', error)
         }
-        console.debug(`${collectionName} total records to process: ${counterRecordsProcessed}, size: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB`);
+        console.debug(`📢 ${collectionName} total records to process: ${counterRecordsProcessed}, size: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB`);
         return { recordsToRemove, counterRecordsProcessed };
     }
 
@@ -223,6 +223,6 @@ export class CleanupRecordsDatabaseService {
             .limit(1) // Fetch only one record
             .project({ _id: 1 }) // Only fetch required fields, if applicable
             .toArray();
-        console.log(yearsAgo, onlyRecordsIds[0]?._id);
+        console.log("📌 Query", query, onlyRecordsIds[0]?._id);
     }
 }
