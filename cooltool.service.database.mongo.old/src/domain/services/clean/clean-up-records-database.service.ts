@@ -1,31 +1,26 @@
 import { Injectable, Inject, Logger  } from '@nestjs/common';
 import { excludeCollectionsToRemove } from 'src/domain/const/exclude-collections-to-remove';
-import { S3 } from 'aws-sdk';
 import * as zlib from 'zlib';
 import { calculateObjectSize } from 'bson';
-import { PassThrough, Readable } from 'stream';
-import * as JSONStream from 'JSONStream';
+import { PassThrough } from 'stream';
 
 @Injectable()
 export class CleanupRecordsDatabaseService {
 
-    private s3 = new S3({ 
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        region: process.env.AWS_REGION || 'us-east-1'
-     });
     private BUCKET_NAME = process.env.S3_BUCKET_NAME || 'your-s3-bucket';
     private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
     private STORAGE_CLASS = process.env.S3_STORAGE_CLASS || 'STANDARD_IA ';
-    private MaxSizeToSave = 1000 //MB
 
-    private readonly logger = new Logger(CleanupRecordsDatabaseService.name);
-    
+    private MaxSizeToSave = 10 //MB
     private DefaultBatchSize = 500; // Define the size of each batch
     private DefaultYearsAgoToRemove = 5;
 
+    private readonly logger = new Logger(CleanupRecordsDatabaseService.name);
+    
+
     constructor(
         @Inject('DATABASE_CONNECTION') private readonly db: any,
+        @Inject('S3') private readonly s3: any,
     ) { }
 
     /**
@@ -126,8 +121,8 @@ export class CleanupRecordsDatabaseService {
                 const day = String(now.getDate()).padStart(2, '0');
                 const fromId = recordsToRemove[0]?._id.toString() || 'start';
                 const toId = recordsToRemove[recordsToRemove.length - 1]?._id.toString() || 'end';
-                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove}_date_${year}-${month}-${day}.gz`;
-    
+                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove.length}_date_${year}-${month}-${day}.gz`;
+
                 console.debug(`Saving large file in S3 via streaming...`);
     
                 const jsonStream = new PassThrough();
@@ -229,72 +224,5 @@ export class CleanupRecordsDatabaseService {
             .project({ _id: 1 }) // Only fetch required fields, if applicable
             .toArray();
         console.log(yearsAgo, onlyRecordsIds[0]?._id);
-    }
-
-    
-    public async restoreBackupFromS3(collectionName: string, backupFileKey: string) {
-        return new Promise<void>((resolve, reject) => {
-            try {
-                backupFileKey = `${this.ARCHIVE_FOLDER}${collectionName}/${backupFileKey}`;
-                console.log(`🔄 Restoring records from ${backupFileKey} to ${collectionName}`);
-    
-                const collection = this.db.collection(collectionName);
-                const batchSize = this.DefaultBatchSize; // Adjust based on your needs
-                let batch: any[] = [];
-                let totalRecords = 0;
-    
-                // Fetch file from S3 as a stream
-                const s3Stream = this.s3.getObject({
-                    Bucket: this.BUCKET_NAME,
-                    Key: backupFileKey
-                }).createReadStream();
-    
-                // Decompress and parse JSON
-                const gunzipStream = zlib.createGunzip();
-                const jsonStream = JSONStream.parse('*');
-    
-                s3Stream
-                    .pipe(gunzipStream) // Decompress
-                    .pipe(jsonStream) // Parse JSON objects
-                    .on('data', async (record: any) => {
-                        batch.push(record);
-    
-                        // When batch reaches batchSize, insert into MongoDB
-                        if (batch.length >= batchSize) {
-                            jsonStream.pause(); // Pause stream while inserting
-                            await collection.insertMany(batch);
-                            totalRecords += batch.length;
-                            console.log(`✅ Inserted ${totalRecords} records so far...`);
-                            batch = [];
-                            jsonStream.resume(); // Resume stream after insert
-                        }
-                    })
-                    .on('end', async () => {
-                        // Insert any remaining records
-                        if (batch.length > 0) {
-                            await collection.insertMany(batch);
-                            totalRecords += batch.length;
-                        }
-    
-                        console.log(`🎉 Successfully restored ${totalRecords} records to ${collectionName}`);
-    
-                        // Delete backup file from S3 after successful restore
-                        await this.s3.deleteObject({
-                            Bucket: this.BUCKET_NAME,
-                            Key: backupFileKey
-                        }).promise();
-                        console.log(`🗑️ Deleted backup file ${backupFileKey} from S3`);
-    
-                        resolve(); // Resolve Promise when done
-                    })
-                    .on('error', (error) => {
-                        console.error(`❌ Error restoring backup:`, error);
-                        reject(error);
-                    });
-            } catch (error) {
-                console.error(`❌ Error restoring backup:`, error);
-                reject(error);
-            }
-        });
     }
 }

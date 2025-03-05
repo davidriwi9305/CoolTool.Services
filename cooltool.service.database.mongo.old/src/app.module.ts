@@ -9,7 +9,9 @@ import { CollectionsController } from './interfaces/controllers/collections.cont
 import { DatabaseModule } from './infrastructure/database/database.module';
 import { CleanupDatabaseController } from './interfaces/controllers/cleanup-records-database.controller';
 import { DatabaseBackupModule } from './infrastructure/database/backup-database.module';
+import { S3Module } from './infrastructure/aws/s3.module';
 import { ConfigModule } from '@nestjs/config';
+import { RestoreRecordsDatabaseService } from './domain/services/clean/restore-records-database.service';
 
 
 const providers = [
@@ -17,13 +19,13 @@ const providers = [
   CollectionSizeDatabaseService,
   CollectionSizeDatabaseUseCase,
   CleanupRecordsDatabaseService,
-  CleanupRecordsDatabaseService,
+  RestoreRecordsDatabaseService,
   AppService
 ]
 
 @Module({
   imports: [
-    DatabaseModule, DatabaseBackupModule,
+    DatabaseModule, DatabaseBackupModule, S3Module,
     ConfigModule.forRoot({
       isGlobal: true,
     }),

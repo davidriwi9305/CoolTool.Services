@@ -1001,7 +1001,7 @@ export const excludeCollectionsToRemove = [
     {
         "Name": "CaptureCollection",  //working
         "Excluded": false,
-        "BatchSize": 150, //1000 default
+        "BatchSize": 20, //1000 default
         "YearsAgoToRemove": 3,
         "UpdateIndex": false,
         // "QueryToRemove": {_id:{$lt:194053441}} // First we are going to remove all elements before this id, which means is old than 2017
