@@ -1,6 +1,5 @@
 function ISODate(arg0: string) {
-    var newDate = new Date(arg0);
-    return newDate
+    return new Date(arg0);
 }
 
 export const excludeCollectionsToRemove = [
@@ -1002,10 +1001,10 @@ export const excludeCollectionsToRemove = [
     {
         "Name": "CaptureCollection",  //working
         "Excluded": false,
-        "BatchSize": 1000,
+        "BatchSize": 150, //1000 default
         "YearsAgoToRemove": 3,
         "UpdateIndex": false,
-        "QueryToRemove": {_id:{$lt:194053441}} // First we are going to remove all elements before this id, which means is old than 2017
-        // "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2017-12-31T00:00:00.000Z") },"CreateDate": { "$lt": ISODate("2017-12-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
+        // "QueryToRemove": {_id:{$lt:194053441}} // First we are going to remove all elements before this id, which means is old than 2017
+        "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2021-12-31T00:00:00.000Z") },"CreateDate": { "$lt": ISODate("2021-12-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
     }
 ]

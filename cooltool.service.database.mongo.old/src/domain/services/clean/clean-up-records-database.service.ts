@@ -2,6 +2,7 @@ import { Injectable, Inject, Logger  } from '@nestjs/common';
 import { excludeCollectionsToRemove } from 'src/domain/const/exclude-collections-to-remove';
 import { S3 } from 'aws-sdk';
 import * as zlib from 'zlib';
+import { calculateObjectSize } from 'bson';
 
 @Injectable()
 export class CleanupRecordsDatabaseService {
@@ -158,17 +159,15 @@ export class CleanupRecordsDatabaseService {
 
         const query = QueryToRemove ?? {[FieldToCheck]: { $lt: yearsAgo }};
         let recordsToRemove;
-        console.log({collectionName}, query)
         // const firstRecord = await this.db.collection(collectionName).findOne(query);
-        const firstRecord = await this.db.collection(collectionName)
+        const onlyRecordsIds = await this.db.collection(collectionName)
                                 .find(query)
                                 .sort({ _id: 1 }) // Sort by _id for consistent batching
                                 .limit(1) // Fetch only one record
                                 .project({ _id: 1 }) // Only fetch required fields, if applicable
                                 .toArray();
 
-        console.log(yearsAgo, firstRecord[0]?._id)
-        console.log(`Current Total Elements: ${firstRecord.length}`)
+        console.log(yearsAgo, onlyRecordsIds[0]?._id)
         try {
             recordsToRemove = await this.db
             .collection(collectionName)
@@ -179,7 +178,6 @@ export class CleanupRecordsDatabaseService {
         } catch (error) {
             console.log('Get records to remove having problems', error)
         }
-        return
         counterRecordsProcessed += recordsToRemove.length;
         console.log(`${collectionName} total records to process: ${counterRecordsProcessed}`);
         return { recordsToRemove, counterRecordsProcessed };
