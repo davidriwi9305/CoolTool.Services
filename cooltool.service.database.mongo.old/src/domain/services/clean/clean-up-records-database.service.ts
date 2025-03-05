@@ -3,6 +3,8 @@ import { excludeCollectionsToRemove } from 'src/domain/const/exclude-collections
 import { S3 } from 'aws-sdk';
 import * as zlib from 'zlib';
 import { calculateObjectSize } from 'bson';
+import { PassThrough, Readable } from 'stream';
+import * as JSONStream from 'JSONStream';
 
 @Injectable()
 export class CleanupRecordsDatabaseService {
@@ -15,10 +17,11 @@ export class CleanupRecordsDatabaseService {
     private BUCKET_NAME = process.env.S3_BUCKET_NAME || 'your-s3-bucket';
     private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
     private STORAGE_CLASS = process.env.S3_STORAGE_CLASS || 'STANDARD_IA ';
+    private MaxSizeToSave = 1000 //MB
 
     private readonly logger = new Logger(CleanupRecordsDatabaseService.name);
     
-    private DefaultBatchSize = 1000; // Define the size of each batch
+    private DefaultBatchSize = 500; // Define the size of each batch
     private DefaultYearsAgoToRemove = 5;
 
     constructor(
@@ -73,10 +76,10 @@ export class CleanupRecordsDatabaseService {
 
                         if (recordsToRemove.length > 0) {
 
-                            let insertResult;
+                            let savedBackup = false;
 
-                            ({ insertResult } = await this.insertingRecordsToRemoveToBackup(insertResult, collectionName, recordsToRemove));
-                            await this.removingRecordsFromMain(insertResult, recordsToRemove, collectionName);
+                            ({ savedBackup } = await this.insertingRecordsToRemoveToBackup(savedBackup, collectionName, recordsToRemove));
+                            await this.removingRecordsFromMain(savedBackup, recordsToRemove, collectionName);
                             
                         } else {
                             console.log(`${collectionName} has not more records to process, total processed: ${counterRecordsProcessed}`);
@@ -102,51 +105,65 @@ export class CleanupRecordsDatabaseService {
     /**
     * Ensures necessary removing records from main database
     */
-    private async removingRecordsFromMain(insertResult: any, recordsToRemove: any, collectionName: any) {
-        if (insertResult && insertResult.ETag) {
+    private async removingRecordsFromMain(savedBackup: any, recordsToRemove: any, collectionName: any) {
+        console.log({savedBackup})
+        if (savedBackup) {
             const idsToDelete = recordsToRemove.map((record) => record._id);
             const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
             console.log(`Deleted ${deleteResult.deletedCount} records from ${collectionName} inside Main Database`);
         } else {
-            console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${insertResult.insertedCount}`);
+            console.warn(`Not all records were backed up to ${collectionName}. Expected: ${recordsToRemove.length}, Inserted: ${savedBackup}`);
         }
     }
 
-    private async insertingRecordsToRemoveToBackup(insertResult: any, collectionName: any, recordsToRemove: any) {
-        let savedBackup = false
+    private async insertingRecordsToRemoveToBackup(savedBackup: boolean, collectionName: any, recordsToRemove: any) {
+    
         do {
             try {
-                const compressedData = zlib.gzipSync(JSON.stringify(recordsToRemove));
                 const now = new Date();
                 const year = now.getFullYear();
                 const month = String(now.getMonth() + 1).padStart(2, '0');
                 const day = String(now.getDate()).padStart(2, '0');
                 const fromId = recordsToRemove[0]?._id.toString() || 'start';
                 const toId = recordsToRemove[recordsToRemove.length - 1]?._id.toString() || 'end';
-                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_${year}-${month}-${day}.gz`;
-                
-                console.debug(`Saving in bucket`);
-
-                insertResult = await this.s3.putObject({
+                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove}_date_${year}-${month}-${day}.gz`;
+    
+                console.debug(`Saving large file in S3 via streaming...`);
+    
+                const jsonStream = new PassThrough();
+                const gzipStream = zlib.createGzip();
+    
+                // Create an S3 upload stream
+                const uploadStream = this.s3.upload({
                     Bucket: this.BUCKET_NAME,
                     Key: fileName,
-                    Body: compressedData,
+                    Body: jsonStream.pipe(gzipStream), // Compress as it streams
                     ContentEncoding: 'gzip',
                     ContentType: 'application/json',
                     StorageClass: this.STORAGE_CLASS,
                 }).promise();
-
+    
+                // Write JSON objects as a stream (avoiding large in-memory strings)
+                jsonStream.write('['); // Start JSON array
+                for (let i = 0; i < recordsToRemove.length; i++) {
+                    jsonStream.write(JSON.stringify(recordsToRemove[i]));
+                    if (i < recordsToRemove.length - 1) jsonStream.write(','); // Add commas between objects
+                }
+                jsonStream.write(']'); // End JSON array
+                jsonStream.end(); // Close the stream
+    
+                await uploadStream; // Wait for the upload to complete
                 savedBackup = true;
-
-                console.debug(`Saved elements inside bucket: ${this.BUCKET_NAME}/${fileName}`);
+    
+                console.debug(`✅ Large file saved successfully in S3: ${this.BUCKET_NAME}/${fileName}`);
             } catch (error) {
-                console.log(error)
-                console.log(`Data found in backup S3 storage, processing removal and restarting process`);
+                console.error(`Error while saving large file to S3:`, error);
                 savedBackup = false;
-                console.warn(`Restart process to save data`);
+                console.warn(`Restarting process to save data...`);
             }
         } while (!savedBackup);
-        return { insertResult, savedBackup };
+    
+        return { savedBackup };
     }
 
     private async getRecordsToRemove(config: any, counterRecordsProcessed: number) {
@@ -158,55 +175,126 @@ export class CleanupRecordsDatabaseService {
         yearsAgo.setFullYear(currentDate.getFullYear() - YearsAgoToRemove);
 
         const query = QueryToRemove ?? {[FieldToCheck]: { $lt: yearsAgo }};
-        let recordsToRemove;
-        // const firstRecord = await this.db.collection(collectionName).findOne(query);
-        const onlyRecordsIds = await this.db.collection(collectionName)
-                                .find(query)
-                                .sort({ _id: 1 }) // Sort by _id for consistent batching
-                                .limit(1) // Fetch only one record
-                                .project({ _id: 1 }) // Only fetch required fields, if applicable
-                                .toArray();
+        let recordsToRemove: any[] = [];
+        let totalSizeBytes = 0;
+        const maxSizeBytes = this.MaxSizeToSave * 1024 * 1024; // 300MB
+        let lastId = null; // Track last document ID for pagination
+        let exceededLimit = false;
 
-        console.log(yearsAgo, onlyRecordsIds[0]?._id)
+        await this.printIdWhereStarts(collectionName, query, yearsAgo);
+
         try {
-            recordsToRemove = await this.db
-            .collection(collectionName)
-            .find(query)
-            .limit(BatchSize)
-            .sort({ _id: 1 }) // Sort by _id to ensure consistent batching
-            .toArray();
+            while (!exceededLimit) {
+                // Adjust query for pagination
+                const batchQuery = lastId ? { ...query, _id: { $gt: lastId } } : query;
+    
+                const batch = await this.db
+                    .collection(collectionName)
+                    .find(batchQuery)
+                    .limit(BatchSize)
+                    .sort({ _id: 1 }) // Sort by _id to ensure consistent batching
+                    .toArray();
+    
+                if (batch.length === 0) break; // Stop if no more records
+    
+                let batchSizeBytes = batch.reduce((sum, doc) => sum + calculateObjectSize(doc), 0);
+                
+                // If adding the full batch exceeds 300MB, we stop after this batch
+                if (totalSizeBytes + batchSizeBytes > maxSizeBytes) {
+                    exceededLimit = true; // Mark as last batch
+                }
+    
+                for (const doc of batch) {
+                    totalSizeBytes += calculateObjectSize(doc);
+                    recordsToRemove.push(doc);
+                    lastId = doc._id; // Update last processed ID
+                    counterRecordsProcessed++;
+                }
+
+                console.log(`Accumulating documents until having more than ${this.MaxSizeToSave} MB, Current: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB, total records to remove: ${counterRecordsProcessed}`);
+
+            }
         } catch (error) {
             console.log('Get records to remove having problems', error)
         }
-        counterRecordsProcessed += recordsToRemove.length;
-        console.log(`${collectionName} total records to process: ${counterRecordsProcessed}`);
+        console.debug(`${collectionName} total records to process: ${counterRecordsProcessed}, size: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB`);
         return { recordsToRemove, counterRecordsProcessed };
     }
 
-    public async restoreBackupFromS3(collectionName: string, backupFileKey: string) {
-        try {
-            console.log(`Restoring  records from ${backupFileKey} to ${collectionName}`);
-            const collection = this.db.collection(collectionName);
-            const s3Object = await this.s3.getObject({
-                Bucket: this.BUCKET_NAME,
-                Key: backupFileKey
-            }).promise();
-            
-            const decompressedData = JSON.parse(zlib.gunzipSync(s3Object.Body as Buffer).toString());
-            
-            await collection.insertMany(decompressedData);
-            console.log(`Restored ${decompressedData.length} records to ${collectionName}`);
+    private async printIdWhereStarts(collectionName: string, query:any, yearsAgo:any) {
+        const onlyRecordsIds = await this.db.collection(collectionName)
+            .find(query)
+            .sort({ _id: 1 }) // Sort by _id for consistent batching
+            .limit(1) // Fetch only one record
+            .project({ _id: 1 }) // Only fetch required fields, if applicable
+            .toArray();
+        console.log(yearsAgo, onlyRecordsIds[0]?._id);
+    }
 
-            // Delete the file from S3 after successful restoration
-            await this.s3.deleteObject({
-                Bucket: this.BUCKET_NAME,
-                Key: backupFileKey
-            }).promise();
-            console.log(`Deleted backup file ${backupFileKey} from S3`);
-        } catch (error) {
-            console.error(`Error restoring backup:`, error);
-        } finally {
-            // await this.db.close();
-        }
+    
+    public async restoreBackupFromS3(collectionName: string, backupFileKey: string) {
+        return new Promise<void>((resolve, reject) => {
+            try {
+                backupFileKey = `${this.ARCHIVE_FOLDER}${collectionName}/${backupFileKey}`;
+                console.log(`🔄 Restoring records from ${backupFileKey} to ${collectionName}`);
+    
+                const collection = this.db.collection(collectionName);
+                const batchSize = this.DefaultBatchSize; // Adjust based on your needs
+                let batch: any[] = [];
+                let totalRecords = 0;
+    
+                // Fetch file from S3 as a stream
+                const s3Stream = this.s3.getObject({
+                    Bucket: this.BUCKET_NAME,
+                    Key: backupFileKey
+                }).createReadStream();
+    
+                // Decompress and parse JSON
+                const gunzipStream = zlib.createGunzip();
+                const jsonStream = JSONStream.parse('*');
+    
+                s3Stream
+                    .pipe(gunzipStream) // Decompress
+                    .pipe(jsonStream) // Parse JSON objects
+                    .on('data', async (record: any) => {
+                        batch.push(record);
+    
+                        // When batch reaches batchSize, insert into MongoDB
+                        if (batch.length >= batchSize) {
+                            jsonStream.pause(); // Pause stream while inserting
+                            await collection.insertMany(batch);
+                            totalRecords += batch.length;
+                            console.log(`✅ Inserted ${totalRecords} records so far...`);
+                            batch = [];
+                            jsonStream.resume(); // Resume stream after insert
+                        }
+                    })
+                    .on('end', async () => {
+                        // Insert any remaining records
+                        if (batch.length > 0) {
+                            await collection.insertMany(batch);
+                            totalRecords += batch.length;
+                        }
+    
+                        console.log(`🎉 Successfully restored ${totalRecords} records to ${collectionName}`);
+    
+                        // Delete backup file from S3 after successful restore
+                        await this.s3.deleteObject({
+                            Bucket: this.BUCKET_NAME,
+                            Key: backupFileKey
+                        }).promise();
+                        console.log(`🗑️ Deleted backup file ${backupFileKey} from S3`);
+    
+                        resolve(); // Resolve Promise when done
+                    })
+                    .on('error', (error) => {
+                        console.error(`❌ Error restoring backup:`, error);
+                        reject(error);
+                    });
+            } catch (error) {
+                console.error(`❌ Error restoring backup:`, error);
+                reject(error);
+            }
+        });
     }
 }
