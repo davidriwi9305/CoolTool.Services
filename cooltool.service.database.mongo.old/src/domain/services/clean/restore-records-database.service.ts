@@ -1,82 +1,124 @@
-import { Injectable, Inject, Logger  } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { S3 } from 'aws-sdk';
 import * as zlib from 'zlib';
 import * as JSONStream from 'JSONStream';
 
 @Injectable()
 export class RestoreRecordsDatabaseService {
-
     private BUCKET_NAME = process.env.S3_BUCKET_NAME || 'your-s3-bucket';
     private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
-
-    private DefaultBatchSize = 500; // Define the size of each batch to recover
-    
+    private DefaultBatchSize = 500;
     private readonly logger = new Logger(RestoreRecordsDatabaseService.name);
+
     constructor(
         @Inject('DATABASE_CONNECTION') private readonly db: any,
-        @Inject('S3') private readonly s3: any,
-    ) { }
+        @Inject('S3') private readonly s3: S3,
+    ) {}
 
-    /**
-    * Principal function to restore old records
-    */
-    public async restoreBackupFromS3(collectionName: string, backupFileKey: string) {
+    public async restoreBackupFromS3(collectionName: string, backupFileKey: string): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             try {
                 backupFileKey = `${this.ARCHIVE_FOLDER}${collectionName}/${backupFileKey}`;
                 console.log(`🔄 Restoring records from ${backupFileKey} to ${collectionName}`);
-    
+
                 const collection = this.db.collection(collectionName);
-                const batchSize = this.DefaultBatchSize; // Adjust based on your needs
                 let batch: any[] = [];
                 let totalRecords = 0;
-    
-                // Fetch file from S3 as a stream
+                let restoreFailed = false;
+                let insertPromises: Promise<any>[] = [];
+
+                let firstRestoredId: any = null;
+                let lastRestoredId: any = null;
+
                 const s3Stream = this.s3.getObject({
                     Bucket: this.BUCKET_NAME,
                     Key: backupFileKey
                 }).createReadStream();
-    
-                // Decompress and parse JSON
+
                 const gunzipStream = zlib.createGunzip();
                 const jsonStream = JSONStream.parse('*');
-    
+
                 s3Stream
-                    .pipe(gunzipStream) // Decompress
-                    .pipe(jsonStream) // Parse JSON objects
+                    .pipe(gunzipStream)
+                    .pipe(jsonStream)
                     .on('data', async (record: any) => {
+                        if (!firstRestoredId) firstRestoredId = record._id;
+                        lastRestoredId = record._id;
+
+                        // Ensure `LastUpdated` and `CreateDate` are stored as Date
+                        if (record.LastUpdated) record.LastUpdated = new Date(record.LastUpdated);
+                        if (record.CreateDate) record.CreateDate = new Date(record.CreateDate);
+
                         batch.push(record);
-    
-                        // When batch reaches batchSize, insert into MongoDB
-                        if (batch.length >= batchSize) {
-                            jsonStream.pause(); // Pause stream while inserting
-                            await collection.insertMany(batch);
+
+                        if (batch.length >= this.DefaultBatchSize) {
+                            jsonStream.pause();
+
+                            insertPromises.push(
+                                Promise.all(batch.map(doc => 
+                                    collection.updateOne(
+                                        { _id: doc._id }, // Match by _id
+                                        { $set: doc },    // Overwrite fields
+                                        { upsert: true }  // Insert if not exists
+                                    )
+                                )).catch(err => {
+                                    console.error(`⚠️ Insert error:`, err);
+                                    restoreFailed = true;
+                                })
+                            );
+
                             totalRecords += batch.length;
                             console.log(`✅ Inserted ${totalRecords} records so far...`);
                             batch = [];
-                            jsonStream.resume(); // Resume stream after insert
+                            jsonStream.resume();
                         }
                     })
                     .on('end', async () => {
-                        // Insert any remaining records
-                        if (batch.length > 0) {
-                            await collection.insertMany(batch);
-                            totalRecords += batch.length;
+                        try {
+                            if (batch.length > 0) {
+                                insertPromises.push(
+                                    Promise.all(batch.map(doc => 
+                                        collection.updateOne(
+                                            { _id: doc._id },
+                                            { $set: doc },
+                                            { upsert: true }
+                                        )
+                                    )).catch(err => {
+                                        console.error(`⚠️ Insert error:`, err);
+                                        restoreFailed = true;
+                                    })
+                                );
+                                totalRecords += batch.length;
+                            }
+
+                            await Promise.all(insertPromises);
+
+                            const firstDocId = await collection.findOne({ _id: firstRestoredId });
+                            console.log('🔍 Verified First restored doc:', firstDocId._id);
+
+                            const lastDocId = await collection.findOne({ _id: lastRestoredId });
+                            console.log('🔍 Verified Last restored doc:', lastDocId?._id);
+
+                            if (!restoreFailed && firstDocId != undefined && lastDocId != undefined) {
+                                console.log(`🎉 Successfully restored ${totalRecords} records to ${collectionName}`);
+
+                                await this.s3.deleteObject({
+                                    Bucket: this.BUCKET_NAME,
+                                    Key: backupFileKey
+                                }).promise();
+                                console.log(`🗑️ Deleted backup file ${backupFileKey} from S3`);
+                            } else {
+                                console.warn(`⚠️ Some records failed to restore, backup file **not** deleted.`);
+                            }
+
+                            resolve();
+                        } catch (error) {
+                            console.error(`❌ Error during final insert:`, error);
+                            reject(error);
                         }
-    
-                        console.log(`🎉 Successfully restored ${totalRecords} records to ${collectionName}`);
-    
-                        // Delete backup file from S3 after successful restore
-                        await this.s3.deleteObject({
-                            Bucket: this.BUCKET_NAME,
-                            Key: backupFileKey
-                        }).promise();
-                        console.log(`🗑️ Deleted backup file ${backupFileKey} from S3`);
-    
-                        resolve(); // Resolve Promise when done
                     })
                     .on('error', (error) => {
-                        console.error(`❌ Error restoring backup:`, error);
+                        console.error(`❌ Stream error:`, error);
                         reject(error);
                     });
             } catch (error) {

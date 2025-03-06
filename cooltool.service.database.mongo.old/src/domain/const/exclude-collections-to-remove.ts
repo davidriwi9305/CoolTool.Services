@@ -1001,10 +1001,11 @@ export const excludeCollectionsToRemove = [
     {
         "Name": "CaptureCollection",  //working
         "Excluded": false,
-        "BatchSize": 500, //1000 default
+        "BatchSize": 1000, //1000 default
+        "SizeFileS3": 300, //MB
         "YearsAgoToRemove": 3,
         "UpdateIndex": false,
         "Prefix": "2022",
-        "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2022-09-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
+        "QueryToRemove": {LastUpdated: { $lt:ISODate("2022-04-31T10:13:25.963Z")}} // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
     }
 ]
