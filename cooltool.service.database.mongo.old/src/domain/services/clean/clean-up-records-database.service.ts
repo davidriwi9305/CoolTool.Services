@@ -11,7 +11,7 @@ export class CleanupRecordsDatabaseService {
     private ARCHIVE_FOLDER = process.env.S3_ARCHIVE_FOLDER || 'mongo_archives/';
     private STORAGE_CLASS = process.env.S3_STORAGE_CLASS || 'STANDARD_IA ';
 
-    private MaxSizeToSave = 1000 //MB
+    private MaxSizeToSave = 300 //MB
     private DefaultBatchSize = 500; // Define the size of each batch
     private DefaultYearsAgoToRemove = 5;
 
@@ -28,6 +28,8 @@ export class CleanupRecordsDatabaseService {
     */
     async cleanupOldRecords(): Promise<void> {
         try {
+            console.log(process.memoryUsage());
+
             const collections = await this.db.listCollections().toArray();
 
             // Filter out excluded collections using `Name` and `Excluded`
@@ -40,22 +42,28 @@ export class CleanupRecordsDatabaseService {
 
             // Map collections with their specific configuration
             const collectionsWithConfig = collectionsToProcess.map((collection) => {
+                
                 const config = excludeCollectionsToRemove.find(
                     (excludeItem) => excludeItem.Name === collection.name
                 );
+
+                if(config?.Excluded == true || config?.Excluded == undefined) return;
+
                 return {
                     collectionName: collection.name,
                     BatchSize: config?.BatchSize ?? this.DefaultBatchSize, // Default to the service-level BatchSize
                     YearsAgoToRemove: config?.YearsAgoToRemove ?? this.DefaultYearsAgoToRemove, // Default to service-level YearsAgoToRemove
                     UpdateIndex: config?.UpdateIndex ?? true,
                     FieldToCheck: config?.FieldToCheck ?? "LastUpdated",
-                    QueryToRemove: config?.QueryToRemove
+                    QueryToRemove: config?.QueryToRemove,
+                    Prefix: config?.Prefix ?? "",
                 };
-            });
+            })
+            .filter(Boolean); // Removes undefined values;
 
             const collectionPromises = collectionsWithConfig.map(async (config) => {
 
-                const { BatchSize, collectionName, YearsAgoToRemove, UpdateIndex, FieldToCheck } = config;
+                const { BatchSize, collectionName, Prefix } = config;
 
                 let hasMoreRecords = true;
                 let counterRecordsProcessed = 0;
@@ -73,7 +81,7 @@ export class CleanupRecordsDatabaseService {
 
                             let savedBackup = false;
 
-                            ({ savedBackup } = await this.insertingRecordsToRemoveToBackup(savedBackup, collectionName, recordsToRemove));
+                            ({ savedBackup } = await this.insertingRecordsToRemoveToBackup(savedBackup, collectionName, recordsToRemove, Prefix));
                             await this.removingRecordsFromMain(savedBackup, recordsToRemove, collectionName);
                             
                         } else {
@@ -111,7 +119,7 @@ export class CleanupRecordsDatabaseService {
         }
     }
 
-    private async insertingRecordsToRemoveToBackup(savedBackup: boolean, collectionName: any, recordsToRemove: any) {
+    private async insertingRecordsToRemoveToBackup(savedBackup: boolean, collectionName: any, recordsToRemove: any, prefix: string) {
     
         do {
             try {
@@ -121,7 +129,7 @@ export class CleanupRecordsDatabaseService {
                 const day = String(now.getDate()).padStart(2, '0');
                 const fromId = recordsToRemove[0]?._id.toString() || 'start';
                 const toId = recordsToRemove[recordsToRemove.length - 1]?._id.toString() || 'end';
-                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove.length}_date_${year}-${month}-${day}.gz`;
+                const fileName = `${this.ARCHIVE_FOLDER}${collectionName}/backup_fromId_${fromId}_toId_${toId}_total_records_${recordsToRemove.length}_prefix_${prefix}_date_${year}-${month}-${day}.gz`;
 
                 console.debug(`📤 Saving large file in S3 via streaming...`);
     

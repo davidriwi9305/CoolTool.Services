@@ -1001,11 +1001,10 @@ export const excludeCollectionsToRemove = [
     {
         "Name": "CaptureCollection",  //working
         "Excluded": false,
-        "BatchSize": 150, //1000 default
+        "BatchSize": 500, //1000 default
         "YearsAgoToRemove": 3,
         "UpdateIndex": false,
-        // "QueryToRemove": {_id:{$lt:194053441}} // First we are going to remove all elements before this id, which means is old than 2017
-        // "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2021-12-31T00:00:00.000Z") },"CreateDate": { "$lt": ISODate("2021-12-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
-        "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2022-06-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
+        "Prefix": "2022",
+        "QueryToRemove": { "LastUpdated": { "$lt": ISODate("2022-09-31T00:00:00.000Z") } } // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
     }
 ]
