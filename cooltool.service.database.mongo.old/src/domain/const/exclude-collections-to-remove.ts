@@ -962,11 +962,12 @@ export const excludeCollectionsToRemove = [
     },
     {
         "Name": "HttpRequestLog", //Working
-        "Excluded": true,
+        "Excluded": false,
         "BatchSize": 10000,
-        "YearsAgoToRemove": 5,
-        "UpdateIndex": false,
-        "FieldToCheck": "CreateDate"
+        "SizeFileS3": 1000, //MB
+        "Prefix": "2022_2024",
+        "SortToRemove": {CreateDate:1},
+        "QueryToRemove": { "CreateDate": { "$lte": ISODate("2025-01-01T00:00:00.000Z") } }
     },
     {
         "Name": "NeurolabData",
@@ -1000,12 +1001,18 @@ export const excludeCollectionsToRemove = [
     },
     {
         "Name": "CaptureCollection",  //working
-        "Excluded": false,
-        "BatchSize": 1000, //1000 default
-        "SizeFileS3": 300, //MB
+        "Excluded": true,
+        "BatchSize": 200, //1000 default
+        "SizeFileS3": 1000, //MB
         "YearsAgoToRemove": 3,
         "UpdateIndex": false,
-        "Prefix": "2022",
-        "QueryToRemove": {LastUpdated: { $lt:ISODate("2022-04-31T10:13:25.963Z")}} // comenzar subiendo update hasta 2021, removiendo poco a poco y avanzando luego con el create_date
+        "Prefix": "2023_mar_to_apr",
+        "SortToRemove": {LastUpdated:1},
+        "QueryToRemove": {
+            "$and": [
+              { "LastUpdated": { "$gte": ISODate("2023-05-01T00:00:00.000Z") } },
+              { "LastUpdated": { "$lte": ISODate("2023-07-01T00:00:00.000Z") } }
+            ]
+          } // statrting setting LastUpdate until 2021, stirring slowly for instance, until 2023 march, we add one day, because this day start from midnight
     }
 ]

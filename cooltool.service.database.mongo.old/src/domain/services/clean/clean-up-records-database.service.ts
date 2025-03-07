@@ -47,6 +47,7 @@ export class CleanupRecordsDatabaseService {
                 return {
                     collectionName: collection.name,
                     BatchSize: config?.BatchSize ?? this.DefaultBatchSize, // Default to the service-level BatchSize
+                    SortToRemove: config?.SortToRemove ?? {_id: 1},
                     YearsAgoToRemove: config?.YearsAgoToRemove ?? this.DefaultYearsAgoToRemove, // Default to service-level YearsAgoToRemove
                     UpdateIndex: config?.UpdateIndex ?? true,
                     FieldToCheck: config?.FieldToCheck ?? "LastUpdated",
@@ -59,20 +60,20 @@ export class CleanupRecordsDatabaseService {
 
             await Promise.all(collectionsWithConfig.map((config) => this.processCollection(config)));
 
-            console.debug('✅ Cleanup completed for all applicable collections.');
+            this.logger.log('✅ Cleanup completed for all applicable collections.');
         } catch (err) {
-            console.error('❌ Error during cleanup:', err);
+            this.logger.error('❌ Error during cleanup:', err);
         }finally {
             // await this.db.close();
         }
     }
 
     private async processCollection(config: any) {
-        const { BatchSize, collectionName, FieldToCheck, YearsAgoToRemove, Prefix, QueryToRemove, SizeFileS3 } = config;
-        let lastId = null;
+        const { BatchSize, collectionName, FieldToCheck, YearsAgoToRemove, Prefix, QueryToRemove, SizeFileS3, SortToRemove } = config;
+        let lastValue = null;
         let moreRecordsToProcess = true;
     
-        this.logger.log(`🚀 Processing collection: ${collectionName}`);
+        this.logger.log(`🚀 Processing collection: ${collectionName} - Query: ${JSON.stringify(QueryToRemove)} - Batch ${BatchSize} - Sort: ${JSON.stringify(SortToRemove)} `);
     
         while (moreRecordsToProcess) {
             let totalSizeBytes = 0;
@@ -100,22 +101,35 @@ export class CleanupRecordsDatabaseService {
     
             jsonStream.write('['); // Start JSON array
     
-            this.logger.log(`✅ File created to save data in S3: ${this.BUCKET_NAME}/${fileName}, size expected: ${SizeFileS3/(1024 * 1024)} MB`);
+            this.logger.log(`📌 File url in S3: ${this.BUCKET_NAME}/${fileName}, size expected: ${SizeFileS3/(1024 * 1024)} MB`);
     
             try {
                 while (compressedSizeBytes < SizeFileS3) {
-                    const { recordsToRemove, lastProcessedId, batchSizeBytes } = await this.getRecordsToRemove(
+                    const { recordsToRemove, lastProcessedValue, batchSizeBytes } = await this.getRecordsToRemove(
                         collectionName,
                         FieldToCheck,
                         YearsAgoToRemove,
                         BatchSize,
-                        lastId,
-                        QueryToRemove
+                        lastValue,
+                        QueryToRemove,
+                        SortToRemove
                     );
     
                     if (recordsToRemove.length === 0) {
-                        moreRecordsToProcess = false;
-                        break;
+
+                        this.logger.log(`🔍 Checking if there are no more records to add`);
+
+                        let cursor = this.db.collection(collectionName).find(QueryToRemove).limit(1);
+                        let existsDocs = await cursor.hasNext();
+                
+                        if (!existsDocs){
+                            this.logger.log(`📢 Not more records to add ${recordsToRemove.length}`);
+                            moreRecordsToProcess = false;
+                            break;
+                        }else{
+                            this.logger.log(`📢 Exist more records to add, continue adding`);
+                            continue;
+                        }
                     }
     
                     if (!firstBatch) jsonStream.write(',');
@@ -128,11 +142,11 @@ export class CleanupRecordsDatabaseService {
     
                     totalSizeBytes += batchSizeBytes;
                     recordsBuffer.push(...recordsToRemove.map((record) => record._id)); // Store only _id
-                    lastId = lastProcessedId;
+                    lastValue = lastProcessedValue;
     
                     counterRecordsProcessed += recordsToRemove.length;
     
-                    this.logger.log(`⚡ Added docs til' having more than ${SizeFileS3/(1024 * 1024)} MB : ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB, total records to del: ${counterRecordsProcessed}, last Id: ${lastProcessedId}`);
+                    this.logger.log(`⚡ Added docs 'til having more than ${SizeFileS3/(1024 * 1024)} MB : ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB, total records to del: ${counterRecordsProcessed}, last LastUpdated: ${lastProcessedValue}`);
                 }
             } catch (err) {
                 this.logger.error(`❌ Error processing ${collectionName}:`, err);
@@ -140,11 +154,12 @@ export class CleanupRecordsDatabaseService {
                 jsonStream.write(']'); // Close JSON array
                 jsonStream.end();
                 await uploadStream;
-                this.logger.log(`✅ Uploaded ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB (original: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB) to S3`);
+                this.logger.log(`📤 Uploaded ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB (original: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB) to S3`);
     
                 // 🔥 Delete processed records from MongoDB
                 if (recordsBuffer.length > 0) {
                     await this.removeRecordsFromMongo(collectionName, recordsBuffer);
+                    this.logger.log(`✅ Done`);
                 }
             }
     
@@ -167,26 +182,44 @@ export class CleanupRecordsDatabaseService {
         fieldToCheck: string,
         yearsAgo: number,
         batchSize: number,
-        lastId: any,
-        query: any
+        lastValue: any,  // Ahora usamos el último LastUpdated
+        query: any,
+        sort: any
     ) {
         const dateThreshold = new Date();
         dateThreshold.setFullYear(dateThreshold.getFullYear() - yearsAgo);
-
-        const batchQuery = lastId ? { ...query, _id: { $gt: lastId } } : query;
-            
+    
+        // Filtrar con `LastUpdated` en lugar de `_id`
+        const batchQuery = lastValue ? 
+            {
+                "$and": [
+                  {  ...query },
+                  { CreateDate: { $gte: lastValue } }
+                ]
+            }
+            : query;
+    
+        const batchSort = sort; // { LastUpdated: 1 }
+    
         const batch = await this.db
             .collection(collectionName)
             .find(batchQuery)
+            .sort(batchSort)
             .limit(batchSize)
             .toArray();
-
-        if (batch.length === 0) return { recordsToRemove: [], lastProcessedId: null, batchSizeBytes: 0 };
-
-        // Calculate uncompressed batch size
+    
+        if (batch.length === 0) return { recordsToRemove: [], lastProcessedValue: null, batchSizeBytes: 0 };
+    
+        const firstValue = batch[0].CreateDate;
+        lastValue = batch[batch.length - 1].CreateDate; // Guardamos el último valor procesado
+    
+        // this.logger.log(`📢 FirstValue: ${firstValue}, LastValue: ${lastValue}`);
+    
+        // Calcular el tamaño del batch
         const batchSizeBytes = batch.reduce((total, record) => total + calculateObjectSize(record), 0);
-
-        return { recordsToRemove: batch, lastProcessedId: batch[batch.length - 1]._id, batchSizeBytes };
+    
+        return { recordsToRemove: batch, lastProcessedValue: lastValue, batchSizeBytes };
     }
+    
 
 }
