@@ -47,13 +47,14 @@ export class CleanupRecordsDatabaseService {
                 return {
                     collectionName: collection.name,
                     BatchSize: config?.BatchSize ?? this.DefaultBatchSize, // Default to the service-level BatchSize
-                    SortToRemove: config?.SortToRemove ?? {_id: 1},
+                    SortToRemove: config?.SortToRemove,
                     YearsAgoToRemove: config?.YearsAgoToRemove ?? this.DefaultYearsAgoToRemove, // Default to service-level YearsAgoToRemove
                     UpdateIndex: config?.UpdateIndex ?? true,
                     FieldToCheck: config?.FieldToCheck ?? "LastUpdated",
                     QueryToRemove: config?.QueryToRemove,
                     Prefix: config?.Prefix ?? "",
-                    SizeFileS3: config?.SizeFileS3 ? (config.SizeFileS3 * 1024 * 1024) : this.MaxSizeToSave
+                    SizeFileS3: config?.SizeFileS3 ? (config.SizeFileS3 * 1024 * 1024) : this.MaxSizeToSave,
+                    ThresholdValue: config?.ThresholdValue,
                 };
             })
             .filter(Boolean); // Removes undefined values;
@@ -69,11 +70,11 @@ export class CleanupRecordsDatabaseService {
     }
 
     private async processCollection(config: any) {
-        const { BatchSize, collectionName, FieldToCheck, YearsAgoToRemove, Prefix, QueryToRemove, SizeFileS3, SortToRemove } = config;
+        const { BatchSize, collectionName, FieldToCheck, YearsAgoToRemove, Prefix, QueryToRemove, SizeFileS3, SortToRemove, ThresholdValue } = config;
         let lastValue = null;
         let moreRecordsToProcess = true;
     
-        this.logger.log(`🚀 Processing collection: ${collectionName} - Query: ${JSON.stringify(QueryToRemove)} - Batch ${BatchSize} - Sort: ${JSON.stringify(SortToRemove)} `);
+        this.logger.log(`🚀 Processing collection: ${collectionName} - FieldToCheck: ${FieldToCheck}: ${ThresholdValue} - Limit ${BatchSize}`);
     
         while (moreRecordsToProcess) {
             let totalSizeBytes = 0;
@@ -105,21 +106,22 @@ export class CleanupRecordsDatabaseService {
     
             try {
                 while (compressedSizeBytes < SizeFileS3) {
-                    const { recordsToRemove, lastProcessedValue, batchSizeBytes } = await this.getRecordsToRemove(
+                    const { recordsToRemove, lastProcessedValue, batchSizeBytes, batchQuery } = await this.getRecordsToRemove(
                         collectionName,
                         FieldToCheck,
                         YearsAgoToRemove,
                         BatchSize,
                         lastValue,
                         QueryToRemove,
-                        SortToRemove
+                        SortToRemove,
+                        ThresholdValue
                     );
     
                     if (recordsToRemove.length === 0) {
 
                         this.logger.log(`🔍 Checking if there are no more records to add`);
 
-                        let cursor = this.db.collection(collectionName).find(QueryToRemove).limit(1);
+                        let cursor = this.db.collection(collectionName).find(batchQuery).limit(1);
                         let existsDocs = await cursor.hasNext();
                 
                         if (!existsDocs){
@@ -151,10 +153,17 @@ export class CleanupRecordsDatabaseService {
             } catch (err) {
                 this.logger.error(`❌ Error processing ${collectionName}:`, err);
             } finally {
-                jsonStream.write(']'); // Close JSON array
-                jsonStream.end();
-                await uploadStream;
-                this.logger.log(`📤 Uploaded ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB (original: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB) to S3`);
+
+                if(totalSizeBytes == 0){
+                    jsonStream.destroy(); // Cancel the stream if no data
+                    this.logger.log(`🔥 Destroyed 0 elements to add to S3`);
+                }else{
+                    jsonStream.write(']'); // Close JSON array
+                    jsonStream.end();
+                    await uploadStream;
+                    this.logger.log(`📤 Uploaded ${(compressedSizeBytes/(1024 * 1024)).toFixed(2)} MB (original: ${(totalSizeBytes/(1024 * 1024)).toFixed(2)} MB) to S3`);
+                }
+
     
                 // 🔥 Delete processed records from MongoDB
                 if (recordsBuffer.length > 0) {
@@ -171,10 +180,27 @@ export class CleanupRecordsDatabaseService {
 
     private async removeRecordsFromMongo(collectionName: string, idsToDelete: string[]) {
         if (idsToDelete.length === 0) return;
-
-        const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
-
-        this.logger.log(`🗑️ Deleted ${deleteResult.deletedCount} records from ${collectionName}`);
+    
+        const BATCH_SIZE = 1000; // Define batch size
+        let deletedCount = 0;
+    
+        if (idsToDelete.length <= BATCH_SIZE) {
+            // If the number of records is equal to or less than BATCH_SIZE, delete them all at once
+            const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: idsToDelete } });
+            deletedCount = deleteResult.deletedCount || 0;
+            this.logger.log(`🗑️ Deleted ${deletedCount} records from ${collectionName} in a single operation.`);
+        } else {
+            // Otherwise, process in batches
+            for (let i = 0; i < idsToDelete.length; i += BATCH_SIZE) {
+                const batch = idsToDelete.slice(i, i + BATCH_SIZE);
+                const deleteResult = await this.db.collection(collectionName).deleteMany({ _id: { $in: batch } });
+                deletedCount += deleteResult.deletedCount || 0;
+    
+                this.logger.log(`🗑️ Deleted ${deleteResult.deletedCount} records from ${collectionName} (Batch ${i / BATCH_SIZE + 1})`);
+            }
+        }
+    
+        this.logger.log(`✅ Total Deleted: ${deletedCount} records from ${collectionName}`);
     }
 
     private async getRecordsToRemove(
@@ -184,8 +210,24 @@ export class CleanupRecordsDatabaseService {
         batchSize: number,
         lastValue: any,  // Ahora usamos el último LastUpdated
         query: any,
-        sort: any
+        sort: any,
+        ThresholdValue: any
     ) {
+
+        var complementQuery = {}
+        if(fieldToCheck == "CreateDate")
+        {
+            query = { "CreateDate": { "$lte": new Date(ThresholdValue) } }
+            sort = {CreateDate:1}
+            complementQuery = { CreateDate: { $gt: lastValue } }
+        }
+        else if (fieldToCheck == "LastUpdated")
+            {
+            query = { "LastUpdated": { "$lte": new Date(ThresholdValue) } }
+            sort = {"LastUpdated":1}
+            complementQuery = { LastUpdated: { $gt: lastValue } }
+        }
+
         const dateThreshold = new Date();
         dateThreshold.setFullYear(dateThreshold.getFullYear() - yearsAgo);
     
@@ -194,13 +236,13 @@ export class CleanupRecordsDatabaseService {
             {
                 "$and": [
                   {  ...query },
-                  { CreateDate: { $gte: lastValue } }
+                  complementQuery
                 ]
             }
             : query;
     
         const batchSort = sort; // { LastUpdated: 1 }
-    
+
         const batch = await this.db
             .collection(collectionName)
             .find(batchQuery)
@@ -208,7 +250,7 @@ export class CleanupRecordsDatabaseService {
             .limit(batchSize)
             .toArray();
     
-        if (batch.length === 0) return { recordsToRemove: [], lastProcessedValue: null, batchSizeBytes: 0 };
+        if (batch.length === 0) return { recordsToRemove: [], lastProcessedValue: null, batchSizeBytes: 0, batchQuery };
     
         const firstValue = batch[0].CreateDate;
         lastValue = batch[batch.length - 1].CreateDate; // Guardamos el último valor procesado
@@ -218,8 +260,7 @@ export class CleanupRecordsDatabaseService {
         // Calcular el tamaño del batch
         const batchSizeBytes = batch.reduce((total, record) => total + calculateObjectSize(record), 0);
     
-        return { recordsToRemove: batch, lastProcessedValue: lastValue, batchSizeBytes };
+        return { recordsToRemove: batch, lastProcessedValue: lastValue, batchSizeBytes, batchQuery };
     }
-    
 
 }

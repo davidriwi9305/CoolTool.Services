@@ -851,9 +851,12 @@ export const excludeCollectionsToRemove = [
     },
     {
         "Name": "ExceptionLog",
-        "Excluded": true,
+        "Excluded": false,
         "BatchSize": 1000,
-        "YearsAgoToRemove": 5
+        "SizeFileS3": 1000, //MB
+        "Prefix": "2025_jan_mar",
+        "FieldToCheck": "CreateDate", 
+        "ThresholdValue": "2025-09-10T15:50:32.656+00:00" // Check values ​​before this value
     },
     {
         "Name": "ReportItemStateSettings",
@@ -962,12 +965,12 @@ export const excludeCollectionsToRemove = [
     },
     {
         "Name": "HttpRequestLog", //Working
-        "Excluded": false,
-        "BatchSize": 10000,
+        "Excluded": true,
+        "BatchSize": 50000,
         "SizeFileS3": 1000, //MB
-        "Prefix": "2022_2024",
-        "SortToRemove": {CreateDate:1},
-        "QueryToRemove": { "CreateDate": { "$lte": ISODate("2025-01-01T00:00:00.000Z") } }
+        "Prefix": "2025_jan_mar",
+        "FieldToCheck": "CreateDate", 
+        "ThresholdValue": "2025-09-10T15:50:32.656+00:00" // Check values ​​before this value
     },
     {
         "Name": "NeurolabData",
