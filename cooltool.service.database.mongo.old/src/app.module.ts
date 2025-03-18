@@ -12,6 +12,7 @@ import { DatabaseBackupModule } from './infrastructure/database/backup-database.
 import { S3Module } from './infrastructure/aws/s3.module';
 import { ConfigModule } from '@nestjs/config';
 import { RestoreRecordsDatabaseService } from './domain/services/clean/restore-records-database.service';
+import { CleanupRecordsByClientDatabaseService } from './domain/services/clean/clean-up-records-by-client-database.service copy'
 
 
 const providers = [
@@ -20,6 +21,7 @@ const providers = [
   CollectionSizeDatabaseUseCase,
   CleanupRecordsDatabaseService,
   RestoreRecordsDatabaseService,
+  CleanupRecordsByClientDatabaseService,
   AppService
 ]
 

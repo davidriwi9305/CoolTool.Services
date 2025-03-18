@@ -23,4 +23,12 @@ export class CleanupDatabaseController {
     await this.cleanDatabaseUseCase.recoverRecords(collection, backupFileKey);
     return true;
   }
+
+  @Get('backup/client/:clientId')
+  async backupByClient(
+    @Param('clientId') clientId: number
+  ): Promise<boolean> {
+    await this.cleanDatabaseUseCase.backupByClient(clientId);
+    return true;
+  }
 }
